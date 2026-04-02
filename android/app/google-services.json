@@ -1,0 +1,54 @@
+{
+  "project_info": {
+    "project_number": "753627592288",
+    "project_id": "safher-a182b",
+    "storage_bucket": "safher-a182b.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:753627592288:android:f00e7897e8c9623ae47505",
+        "android_client_info": {
+          "package_name": "com.example.safher"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "753627592288-udkbqeoj1m9i2a6nqo3f00ln8bju0ktb.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.safher",
+            "certificate_hash": "52ec38de8444ef17c9f63a25a28d2ab2b5c3c354"
+          }
+        },
+        {
+          "client_id": "753627592288-128btpqerunjkbq916no3fc0f2e0klnq.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAUa3xvV1YIykkTHeVUQ5fOGEUzp3JCyAI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "753627592288-128btpqerunjkbq916no3fc0f2e0klnq.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "753627592288-3smcdnbrrab6omhh7ho0gd3lqb1s76qu.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.safher"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
