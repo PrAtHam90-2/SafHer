@@ -1,3 +1,5 @@
+// lib/features/trip/trip_screen.dart
+
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -13,10 +15,17 @@ import '../../core/constants/app_constants.dart';
 import '../../models/contact.dart';
 import '../../services/contacts_service.dart';
 import '../../services/location_service.dart';
+import '../../services/routing_service.dart';
 import '../../services/trip_provider.dart';
 import '../../services/verification_service.dart';
 import '../../widgets/profile_avatar.dart';
 import 'destination_picker.dart';
+
+// ============================================================================
+//  Stadia Maps configuration
+//  Sign up for a free API key (200k tiles/month) at https://client.stadiamaps.com/
+// ============================================================================
+const _kStadiaMapsApiKey = '59a00577-d14e-4018-bb73-938d4f6331a8';
 
 // ============================================================================
 //  TripScreen
@@ -32,27 +41,151 @@ class TripScreen extends ConsumerStatefulWidget {
 class _TripScreenState extends ConsumerState<TripScreen> {
   final MapController _mapController = MapController();
 
+  // ── Live map state ────────────────────────────────────────────────────────
   LatLng? _userPosition;
-
-  // Destination marker — null until user picks a destination.
+  LatLng? _source;          // null = use _userPosition as source
   LatLng? _dest;
+  String  _sourceLabel      = 'My Location (GPS)';
+  bool    _sourceSetManually = false;
+  bool    _hasInitialGpsFix  = false; // prevents multiple auto-fetches
 
+  // ── Route ─────────────────────────────────────────────────────────────────
+  List<LatLng> _routePolyline = []; // OSRM decoded geometry
+  int?         _etaMinutes;
+  bool         _isRouteLoading = false;
+
+  // ── Trip path (tracked during active trip) ────────────────────────────────
   final List<LatLng> _tripPath = [];
   bool _isDeviated = false;
 
+  // ── Stream subscriptions ──────────────────────────────────────────────────
   StreamSubscription<Position>? _positionSub;
   StreamSubscription<String>?   _anomalySub;
 
-  // ── Called by DestinationPickerCard when user selects a place ─────────────
+  // ── Destination change callback ────────────────────────────────────────────
   void _onDestinationChanged(LatLng ll, String label) {
     setState(() => _dest = ll);
-    ref.read(tripProvider.notifier).setDestination(
-      ll.latitude,
-      ll.longitude,
-      label: label,
-    );
+    ref.read(tripProvider.notifier).setDestination(ll.latitude, ll.longitude, label: label);
+    _fetchRoute();
   }
 
+  // ── Source change callback ────────────────────────────────────────────────
+  void _onSourceChanged(LatLng ll, String label) {
+    setState(() {
+      _source           = ll;
+      _sourceLabel      = label;
+      _sourceSetManually = true;
+    });
+    ref.read(tripProvider.notifier).setSource(ll.latitude, ll.longitude, label: label);
+    _fetchRoute();
+  }
+
+  // ── Reset source to GPS ───────────────────────────────────────────────────
+  void _resetSourceToGps() {
+    setState(() {
+      _source            = _userPosition;
+      _sourceLabel       = 'My Location (GPS)';
+      _sourceSetManually = false;
+    });
+    // Clear source in provider so hasSource returns false
+    ref.read(tripProvider.notifier).setSource(0, 0, label: '');
+    if (_dest != null && _userPosition != null) _fetchRoute();
+  }
+
+  // ── Fetch OSRM route ──────────────────────────────────────────────────────
+  Future<void> _fetchRoute() async {
+    final origin = _source ?? _userPosition;
+    if (origin == null || _dest == null) return;
+
+    setState(() { _isRouteLoading = true; });
+
+    // Determine vehicle profile from verified driver's vehicle model.
+    // All current vehicles map to driving; structure is extensible.
+    final profile = _resolveVehicleProfile();
+
+    final result = await ref.read(routingServiceProvider).fetchRoute(
+      origin:      origin,
+      destination: _dest!,
+      profile:     profile,
+    );
+
+    if (!mounted) return;
+    setState(() {
+      _routePolyline = result?.points ?? [];
+      _etaMinutes    = result?.etaMinutes;
+      _isRouteLoading = false;
+    });
+  }
+
+  VehicleProfile _resolveVehicleProfile() {
+    // Currently always driving. When bike/walk modes are added, check
+    // the verified driver's vehicleModel here and return the right profile.
+    return VehicleProfile.driving;
+  }
+
+  // ── Journey controls ──────────────────────────────────────────────────────
+  void _startJourney() {
+    setState(() {
+      _tripPath.clear();
+      _isDeviated = false;
+      if (_userPosition != null) _tripPath.add(_userPosition!);
+    });
+    ref.read(tripProvider.notifier).startTripManually();
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      content: Text('🚗 Journey started. Monitoring route…'),
+      backgroundColor: AppColors.safeGreenDark,
+      behavior: SnackBarBehavior.floating,
+      duration: Duration(seconds: 3),
+    ));
+  }
+
+  void _pauseJourney() {
+    ref.read(tripProvider.notifier).pauseTripManually();
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      content: Text('⏸ Trip paused'),
+      behavior: SnackBarBehavior.floating,
+      duration: Duration(seconds: 2),
+    ));
+  }
+
+  void _resumeJourney() {
+    ref.read(tripProvider.notifier).resumeTrip();
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      content: Text('▶ Trip resumed'),
+      backgroundColor: AppColors.safeGreenDark,
+      behavior: SnackBarBehavior.floating,
+      duration: Duration(seconds: 2),
+    ));
+  }
+
+  void _endJourney() {
+    ref.read(tripProvider.notifier).endTripManually();
+    setState(() {
+      _tripPath.clear();
+      _isDeviated = false;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      content: Text('🏁 Trip ended safely'),
+      backgroundColor: AppColors.primaryPink,
+      behavior: SnackBarBehavior.floating,
+      duration: Duration(seconds: 3),
+    ));
+  }
+
+  void _shareTrip() {
+    if (_userPosition != null) {
+      final link = 'https://www.google.com/maps?q=${_userPosition!.latitude},${_userPosition!.longitude}';
+      Share.share('🚨 Live Trip Tracking:\n$link', subject: 'SafHer Live Trip');
+    } else {
+      Clipboard.setData(const ClipboardData(text: 'https://www.google.com/maps'));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Location not available yet — link copied'),
+        behavior: SnackBarBehavior.floating,
+      ));
+    }
+  }
+
+  // ── Lifecycle ─────────────────────────────────────────────────────────────
   @override
   void initState() {
     super.initState();
@@ -65,10 +198,17 @@ class _TripScreenState extends ConsumerState<TripScreen> {
           final ll = LatLng(pos.latitude, pos.longitude);
           setState(() {
             _userPosition = ll;
-            if (ref.read(tripProvider).isTripActive) {
-              _tripPath.add(ll);
-            }
+            // Auto-track source from GPS until user sets it manually
+            if (!_sourceSetManually) _source = ll;
+            if (ref.read(tripProvider).isTripActive) _tripPath.add(ll);
           });
+
+          // Fetch route once on first GPS fix if destination is already set
+          if (!_hasInitialGpsFix && _dest != null && !_sourceSetManually) {
+            _hasInitialGpsFix = true;
+            _fetchRoute();
+          }
+
           try {
             _mapController.move(ll, _mapController.camera.zoom);
           } catch (_) {}
@@ -79,17 +219,13 @@ class _TripScreenState extends ConsumerState<TripScreen> {
 
       _anomalySub = ref.read(tripProvider.notifier).anomalyStream.listen((msg) {
         if (!mounted) return;
-        if (msg.contains('Unusual route')) {
-          setState(() => _isDeviated = true);
-        }
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(msg),
-            backgroundColor: AppColors.primaryPink,
-            behavior: SnackBarBehavior.floating,
-            duration: const Duration(seconds: 4),
-          ),
-        );
+        if (msg.contains('Unusual route')) setState(() => _isDeviated = true);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(msg),
+          backgroundColor: AppColors.primaryPink,
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 4),
+        ));
       });
     });
   }
@@ -102,39 +238,6 @@ class _TripScreenState extends ConsumerState<TripScreen> {
     super.dispose();
   }
 
-  void _shareTrip() {
-    if (_userPosition != null) {
-      final link =
-          'https://www.google.com/maps?q=${_userPosition!.latitude},${_userPosition!.longitude}';
-      Share.share('🚨 Live Trip Tracking:\n$link', subject: 'SafHer Live Trip');
-    } else {
-      Clipboard.setData(const ClipboardData(text: 'https://www.google.com/maps'));
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Location not available yet — link copied'),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    }
-  }
-
-  void _startJourney() {
-    setState(() {
-      _tripPath.clear();
-      _isDeviated = false;
-      if (_userPosition != null) _tripPath.add(_userPosition!);
-    });
-    ref.read(tripProvider.notifier).startTripManually();
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('🚗 Journey started. Monitoring route…'),
-        backgroundColor: AppColors.safeGreenDark,
-        behavior: SnackBarBehavior.floating,
-        duration: Duration(seconds: 3),
-      ),
-    );
-  }
-
   // ══════════════════════════════════════════════════════════════════════════
   //  BUILD
   // ══════════════════════════════════════════════════════════════════════════
@@ -143,7 +246,6 @@ class _TripScreenState extends ConsumerState<TripScreen> {
   Widget build(BuildContext context) {
     final tripState = ref.watch(tripProvider);
 
-    // Compute remaining distance from live TripState — respects dynamic destination.
     final double? remainingKm = tripState.hasDestination &&
             tripState.distanceToDestinationMetres != null
         ? tripState.distanceToDestinationMetres! / 1000.0
@@ -157,23 +259,19 @@ class _TripScreenState extends ConsumerState<TripScreen> {
           _isDeviated = false;
           if (_userPosition != null) _tripPath.add(_userPosition!);
         });
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('🚗 Trip started automatically'),
-            backgroundColor: AppColors.safeGreenDark,
-            behavior: SnackBarBehavior.floating,
-            duration: Duration(seconds: 3),
-          ),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('🚗 Trip started automatically'),
+          backgroundColor: AppColors.safeGreenDark,
+          behavior: SnackBarBehavior.floating,
+          duration: Duration(seconds: 3),
+        ));
       } else if (previous.isTripActive && !next.isTripActive) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('🏁 Trip ended safely'),
-            backgroundColor: AppColors.primaryPink,
-            behavior: SnackBarBehavior.floating,
-            duration: Duration(seconds: 3),
-          ),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('🏁 Trip ended safely'),
+          backgroundColor: AppColors.primaryPink,
+          behavior: SnackBarBehavior.floating,
+          duration: Duration(seconds: 3),
+        ));
       }
     });
 
@@ -184,32 +282,55 @@ class _TripScreenState extends ConsumerState<TripScreen> {
           children: [
             const Icon(LucideIcons.shield, color: AppColors.primaryPink),
             const SizedBox(width: 8),
-            Text(
-              'SafHer',
-              style: Theme.of(context).textTheme.titleLarge?.copyWith(
+            Text('SafHer',
+                style: Theme.of(context).textTheme.titleLarge?.copyWith(
                     color: AppColors.primaryPink,
                     fontWeight: FontWeight.w800,
-                    fontStyle: FontStyle.italic,
-                  ),
-            ),
+                    fontStyle: FontStyle.italic)),
           ],
         ),
         actions: const [ProfileAvatar()],
       ),
       body: Stack(
         children: [
-          // ── Live map (top 40%) ─────────────────────────────────────────────
+          // ── Map (top 40%) ─────────────────────────────────────────────────
           Positioned(
             top: 0, left: 0, right: 0,
             height: MediaQuery.of(context).size.height * 0.4,
             child: _buildLiveMap(),
           ),
 
-          // ── Destination picker overlay card ───────────────────────────────
+          // ── Route planner overlay — source + destination stacked ──────────
           Positioned(
             top: 16, left: 16, right: 16,
-            child: DestinationPickerCard(
-              onDestinationChanged: _onDestinationChanged,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Source picker
+                SourcePickerCard(
+                  label:         _sourceLabel,
+                  isUsingGps:    !_sourceSetManually,
+                  onSourceChanged: _onSourceChanged,
+                  onResetToGps:  _resetSourceToGps,
+                ),
+                // Connector dots between source and destination rows
+                Padding(
+                  padding: const EdgeInsets.only(left: 22, top: 2, bottom: 2),
+                  child: Column(
+                    children: List.generate(
+                      3,
+                      (_) => Container(
+                        width: 3, height: 3,
+                        margin: const EdgeInsets.symmetric(vertical: 1.5),
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade400, shape: BoxShape.circle),
+                      ),
+                    ),
+                  ),
+                ),
+                // Destination picker
+                DestinationPickerCard(onDestinationChanged: _onDestinationChanged),
+              ],
             ),
           ),
 
@@ -220,13 +341,10 @@ class _TripScreenState extends ConsumerState<TripScreen> {
               decoration: const BoxDecoration(
                 color: AppColors.background,
                 borderRadius: BorderRadius.only(
-                  topLeft: Radius.circular(32),
-                  topRight: Radius.circular(32),
-                ),
+                    topLeft: Radius.circular(32), topRight: Radius.circular(32)),
               ),
               child: SingleChildScrollView(
-                padding: const EdgeInsets.only(
-                    top: 24, left: 16, right: 16, bottom: 100),
+                padding: const EdgeInsets.only(top: 24, left: 16, right: 16, bottom: 100),
                 child: Column(
                   children: [
                     _buildTripProgressCard(context, remainingKm, tripState),
@@ -246,35 +364,27 @@ class _TripScreenState extends ConsumerState<TripScreen> {
             child: Container(
               decoration: BoxDecoration(boxShadow: [
                 BoxShadow(
-                  color: AppColors.primaryPink.withOpacity(0.3),
-                  blurRadius: 20,
-                  offset: const Offset(0, 10),
-                )
+                    color: AppColors.primaryPink.withOpacity(0.3),
+                    blurRadius: 20,
+                    offset: const Offset(0, 10))
               ]),
               child: ElevatedButton(
                 onPressed: () => context.go('/sos'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: AppColors.primaryPink,
                   padding: const EdgeInsets.symmetric(vertical: 20),
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(30)),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
                 ),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     Text('SOS',
                         style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: 2,
-                            )),
+                            color: Colors.white, fontWeight: FontWeight.w900, letterSpacing: 2)),
                     const SizedBox(width: 8),
                     Text('EMERGENCY',
                         style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
-                              letterSpacing: 1,
-                            )),
+                            color: Colors.white, fontWeight: FontWeight.bold, letterSpacing: 1)),
                   ],
                 ),
               ),
@@ -285,56 +395,94 @@ class _TripScreenState extends ConsumerState<TripScreen> {
     );
   }
 
-  // ── Live map ——————————————————————————————————————————————————————————————
-  // Falls back to a central Pune location if neither user nor destination known.
+  // ── Live map ──────────────────────────────────────────────────────────────
   Widget _buildLiveMap() {
     const fallback = LatLng(18.5167, 73.8450);
-    final center = _userPosition ?? _dest ?? fallback;
-    final polylineColor = _isDeviated ? Colors.red : AppColors.primaryPink;
+    final center   = _userPosition ?? _dest ?? fallback;
+
+    // Route polyline: blue (OSRM geometry, shown before/during trip)
+    // Trip path: pink / red when deviated (GPS trail during active trip)
+    final routeColor = const Color(0xFF4285F4); // Google Maps blue
+    final pathColor  = _isDeviated ? Colors.red : AppColors.primaryPink;
 
     return FlutterMap(
       mapController: _mapController,
       options: MapOptions(
         initialCenter: center,
-        initialZoom: 15,
+        initialZoom:   15,
         interactionOptions: const InteractionOptions(
-          flags: InteractiveFlag.pinchZoom | InteractiveFlag.drag,
-        ),
+            flags: InteractiveFlag.pinchZoom | InteractiveFlag.drag),
       ),
       children: [
+        // ── Stadia Maps tile layer ─────────────────────────────────────────
         TileLayer(
           urlTemplate:
-              'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
-          subdomains: const ['a', 'b', 'c', 'd'],
+              'https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}.png'
+              '?api_key=$_kStadiaMapsApiKey',
           userAgentPackageName: 'com.example.safher',
           maxZoom: 19,
         ),
+
+        // ── OSRM route polyline (shown when route is available) ────────────
+        if (_routePolyline.length >= 2)
+          PolylineLayer(
+            polylines: [
+              Polyline(
+                points:      List.unmodifiable(_routePolyline),
+                color:       routeColor,
+                strokeWidth: 5,
+              ),
+            ],
+          ),
+
+        // ── Tracked trip path polyline (only during active trip) ───────────
         if (_tripPath.length >= 2)
           PolylineLayer(
             polylines: [
               Polyline(
-                points: List.unmodifiable(_tripPath),
-                color: polylineColor,
+                points:      List.unmodifiable(_tripPath),
+                color:       pathColor,
                 strokeWidth: 4,
               ),
             ],
           ),
+
+        // ── Markers ────────────────────────────────────────────────────────
         MarkerLayer(
           markers: [
-            // Destination pin — only when user has picked one
+            // Source marker: green dot (only shown when manually set,
+            // otherwise user position marker already marks the origin)
             if (_dest != null)
               Marker(
                 point: _dest!,
-                width: 40,
-                height: 40,
+                width: 40, height: 40,
                 child: const Icon(Icons.location_pin, color: Colors.red, size: 40),
               ),
-            // User position dot
+
+            // Source marker (only when manually chosen — different from GPS)
+            if (_sourceSetManually && _source != null)
+              Marker(
+                point: _source!,
+                width: 28, height: 28,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: AppColors.safeGreenDark,
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white, width: 3),
+                    boxShadow: [
+                      BoxShadow(
+                          color: AppColors.safeGreenDark.withOpacity(0.4),
+                          blurRadius: 8)
+                    ],
+                  ),
+                ),
+              ),
+
+            // User position (live GPS dot)
             if (_userPosition != null)
               Marker(
                 point: _userPosition!,
-                width: 28,
-                height: 28,
+                width: 28, height: 28,
                 child: Container(
                   decoration: BoxDecoration(
                     color: AppColors.primaryPink,
@@ -342,9 +490,8 @@ class _TripScreenState extends ConsumerState<TripScreen> {
                     border: Border.all(color: Colors.white, width: 3),
                     boxShadow: [
                       BoxShadow(
-                        color: AppColors.primaryPink.withOpacity(0.4),
-                        blurRadius: 8,
-                      ),
+                          color: AppColors.primaryPink.withOpacity(0.4),
+                          blurRadius: 8)
                     ],
                   ),
                 ),
@@ -355,27 +502,29 @@ class _TripScreenState extends ConsumerState<TripScreen> {
     );
   }
 
-  // ── Trip progress card ——————————————————————————————————————————————————
-  // Uses dynamic remainingKm derived from TripState (not hardcoded stream).
+  // ── Trip progress card ─────────────────────────────────────────────────────
   Widget _buildTripProgressCard(
     BuildContext context,
     double? remainingKm,
     TripState tripState,
   ) {
     final bool hasDestination = tripState.hasDestination;
-    final double distance = remainingKm ?? 0.0;
-
-    // Progress bar capped at 10 km for visual clarity
-    const double maxDist = 10.0;
-    final double progress = hasDestination && distance <= maxDist
+    final double distance     = remainingKm ?? 0.0;
+    const double maxDist      = 10.0;
+    final double progress     = hasDestination && distance <= maxDist
         ? ((maxDist - distance) / maxDist).clamp(0.0, 1.0)
         : 0.0;
 
     final bool isActive = tripState.isTripActive;
-    final Color pillBg = isActive ? AppColors.safeGreen : Colors.grey.shade200;
-    final Color pillFg = isActive ? AppColors.safeGreenDark : AppColors.textGrey;
-    final String pillLabel =
-        isActive ? '● Trip Active: TRUE' : '○ Trip Active: FALSE';
+    final bool isPaused = tripState.isPaused;
+
+    final Color pillBg    = isActive ? AppColors.safeGreen : Colors.grey.shade200;
+    final Color pillFg    = isActive ? AppColors.safeGreenDark : AppColors.textGrey;
+    final String pillLabel = isPaused
+        ? '⏸ Trip Paused'
+        : isActive
+            ? '● Trip Active: TRUE'
+            : '○ Trip Active: FALSE';
 
     return Container(
       padding: const EdgeInsets.all(20),
@@ -384,15 +533,13 @@ class _TripScreenState extends ConsumerState<TripScreen> {
         borderRadius: BorderRadius.circular(AppConstants.borderRadius),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.04),
-            blurRadius: 16,
-            offset: const Offset(0, 4),
-          ),
+              color: Colors.black.withOpacity(0.04), blurRadius: 16, offset: const Offset(0, 4))
         ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Header row
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -401,63 +548,90 @@ class _TripScreenState extends ConsumerState<TripScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text('Trip in Progress',
-                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                              fontWeight: FontWeight.bold,
-                            )),
+                        style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
                     const SizedBox(height: 4),
                     Text(
                       hasDestination
                           ? '${distance.toStringAsFixed(1)} km remaining to safety'
-                          : 'Set a destination above to track progress',
+                          : 'Set source and destination above',
                       style: Theme.of(context).textTheme.bodyMedium,
                     ),
                   ],
                 ),
               ),
               const SizedBox(width: 8),
-              const Icon(LucideIcons.checkCircle2,
-                  color: AppColors.safeGreenDark, size: 28),
+              // Route loading spinner shown next to icon when fetching
+              if (_isRouteLoading)
+                const SizedBox(
+                  width: 20, height: 20,
+                  child: CircularProgressIndicator(color: AppColors.primaryPink, strokeWidth: 2),
+                )
+              else
+                const Icon(LucideIcons.checkCircle2, color: AppColors.safeGreenDark, size: 28),
             ],
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
+
+          // Status pill
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-            decoration: BoxDecoration(
-              color: pillBg,
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Text(
-              pillLabel,
-              style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: pillFg,
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: 0.4,
-                  ),
-            ),
+            decoration: BoxDecoration(color: pillBg, borderRadius: BorderRadius.circular(20)),
+            child: Text(pillLabel,
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: pillFg, fontWeight: FontWeight.bold, letterSpacing: 0.4)),
           ),
-          const SizedBox(height: 16),
+
+          // ETA row — shown when route is available
+          if (_etaMinutes != null && hasDestination) ...[
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                const Icon(LucideIcons.clock, size: 15, color: AppColors.textGrey),
+                const SizedBox(width: 5),
+                Text(
+                  'ETA: ${_formatEta(_etaMinutes!)}',
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: AppColors.textGrey, fontWeight: FontWeight.w600),
+                ),
+                const Spacer(),
+                if (!_isRouteLoading)
+                  GestureDetector(
+                    onTap: _fetchRoute,
+                    child: Row(
+                      children: [
+                        const Icon(LucideIcons.refreshCw, size: 13, color: AppColors.textLight),
+                        const SizedBox(width: 3),
+                        Text('Recalculate',
+                            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                                color: AppColors.textLight)),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ],
+
+          const SizedBox(height: 14),
+
+          // Progress bar
           Stack(
             children: [
               Container(
                 height: 8,
                 decoration: BoxDecoration(
-                  color: Colors.grey.shade200,
-                  borderRadius: BorderRadius.circular(4),
-                ),
+                    color: Colors.grey.shade200, borderRadius: BorderRadius.circular(4)),
               ),
               FractionallySizedBox(
                 widthFactor: progress,
                 child: Container(
                   height: 8,
                   decoration: BoxDecoration(
-                    color: AppColors.primaryPink,
-                    borderRadius: BorderRadius.circular(4),
-                  ),
+                      color: AppColors.primaryPink, borderRadius: BorderRadius.circular(4)),
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -467,60 +641,105 @@ class _TripScreenState extends ConsumerState<TripScreen> {
               Text('PROGRESS',
                   style: Theme.of(context).textTheme.labelSmall?.copyWith(
                       color: AppColors.primaryPink, fontWeight: FontWeight.bold)),
-              Text('DESTINATION',
-                  style: Theme.of(context).textTheme.labelSmall),
+              Text('DESTINATION', style: Theme.of(context).textTheme.labelSmall),
             ],
           ),
           const SizedBox(height: 16),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton.icon(
+
+          // ── Action buttons ───────────────────────────────────────────────
+          // IDLE: [Share Trip] [▶ Start Journey]
+          // ACTIVE: [Share Trip] [⏸ Pause] [⏹ End Trip]
+          // PAUSED: [Share Trip] [▶ Resume] [⏹ End Trip]
+
+          if (!isActive)
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _shareTrip,
+                    icon: const Icon(LucideIcons.share2, size: 16),
+                    label: const Text('Share Trip'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: AppColors.primaryPink,
+                      side: const BorderSide(color: AppColors.primaryPink),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _startJourney,
+                    icon: const Icon(LucideIcons.play, size: 16),
+                    label: const Text('Start Journey'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.primaryPink,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    ),
+                  ),
+                ),
+              ],
+            )
+          else
+            Row(
+              children: [
+                // Share as icon button to save space for controls
+                IconButton(
                   onPressed: _shareTrip,
-                  icon: const Icon(LucideIcons.share2, size: 16),
-                  label: const Text('Share Trip'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: AppColors.primaryPink,
-                    side: const BorderSide(color: AppColors.primaryPink),
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14)),
+                  icon: const Icon(LucideIcons.share2, color: AppColors.primaryPink),
+                  tooltip: 'Share Trip',
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: isPaused ? _resumeJourney : _pauseJourney,
+                    icon: Icon(isPaused ? LucideIcons.play : LucideIcons.pause, size: 15),
+                    label: Text(isPaused ? 'Resume' : 'Pause'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: AppColors.primaryPink,
+                      side: const BorderSide(color: AppColors.primaryPink),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: ElevatedButton.icon(
-                  onPressed: isActive ? null : _startJourney,
-                  icon: const Icon(LucideIcons.play, size: 16),
-                  label: Text(isActive ? 'Active' : 'Start Journey'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.primaryPink,
-                    foregroundColor: Colors.white,
-                    disabledBackgroundColor: AppColors.safeGreenDark,
-                    disabledForegroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14)),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _endJourney,
+                    icon: const Icon(LucideIcons.x, size: 15),
+                    label: const Text('End Trip'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.primaryPink,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    ),
                   ),
                 ),
-              ),
-            ],
-          ),
+              ],
+            ),
         ],
       ),
     );
   }
 
-  // ── Driver info card — reads from verifyProvider ──────────────────────────
+  String _formatEta(int minutes) {
+    if (minutes < 60) return '$minutes min';
+    final h = minutes ~/ 60;
+    final m = minutes % 60;
+    return m == 0 ? '${h}h' : '${h}h ${m}m';
+  }
+
+  // ── Driver info card — reads from verifyProvider (UNCHANGED) ─────────────
   Widget _buildDriverInfoCard(BuildContext context) {
     final verifyAsync = ref.watch(verifyProvider);
-
-    final data = verifyAsync.maybeWhen(
-      data: (value) => value,
-      orElse: () => null,
-    );
-
+    final data = verifyAsync.maybeWhen(data: (v) => v, orElse: () => null);
     final driverName  = data?.driverName  ?? 'No driver verified';
     final vehicleInfo = data?.vehicleInfo ?? 'Verify a driver on the Verify screen';
     final isVerified  = data != null && data.isActive;
@@ -533,7 +752,6 @@ class _TripScreenState extends ConsumerState<TripScreen> {
       ),
       child: Row(
         children: [
-          // Avatar: initials-based
           Stack(
             clipBehavior: Clip.none,
             children: [
@@ -545,29 +763,19 @@ class _TripScreenState extends ConsumerState<TripScreen> {
                       ? data.driverName[0].toUpperCase()
                       : '?',
                   style: const TextStyle(
-                    color: AppColors.primaryPink,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 22,
-                  ),
+                      color: AppColors.primaryPink, fontWeight: FontWeight.bold, fontSize: 22),
                 ),
               ),
               if (isVerified)
                 Positioned(
-                  bottom: -10,
-                  left: 0,
-                  right: 0,
+                  bottom: -10, left: 0, right: 0,
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
                     decoration: BoxDecoration(
-                      color: AppColors.safeGreen,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
+                        color: AppColors.safeGreen, borderRadius: BorderRadius.circular(10)),
                     child: const Row(
                       mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.verified, size: 10,
-                            color: AppColors.safeGreenDark),
-                      ],
+                      children: [Icon(Icons.verified, size: 10, color: AppColors.safeGreenDark)],
                     ),
                   ),
                 ),
@@ -578,19 +786,10 @@ class _TripScreenState extends ConsumerState<TripScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  driverName,
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.bold,
-                      ),
-                ),
-                Text(
-                  vehicleInfo,
-                  style: Theme.of(context)
-                      .textTheme
-                      .bodySmall
-                      ?.copyWith(color: AppColors.textGrey),
-                ),
+                Text(driverName,
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
+                Text(vehicleInfo,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(color: AppColors.textGrey)),
               ],
             ),
           ),
@@ -598,19 +797,15 @@ class _TripScreenState extends ConsumerState<TripScreen> {
             children: [
               Container(
                 padding: const EdgeInsets.all(8),
-                decoration: const BoxDecoration(
-                    color: AppColors.background, shape: BoxShape.circle),
+                decoration: const BoxDecoration(color: AppColors.background, shape: BoxShape.circle),
                 child: const Icon(LucideIcons.phone, size: 20),
               ),
               const SizedBox(height: 8),
               Container(
                 padding: const EdgeInsets.all(8),
                 decoration: BoxDecoration(
-                  color: AppColors.buttonBlue,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: const Icon(LucideIcons.qrCode,
-                    size: 20, color: AppColors.buttonBlueText),
+                    color: AppColors.buttonBlue, borderRadius: BorderRadius.circular(8)),
+                child: const Icon(LucideIcons.qrCode, size: 20, color: AppColors.buttonBlueText),
               ),
             ],
           ),
@@ -619,7 +814,7 @@ class _TripScreenState extends ConsumerState<TripScreen> {
     );
   }
 
-  // ── Shared contacts card — reads from contactsProvider ────────────────────
+  // ── Shared contacts card — reads from contactsProvider (UNCHANGED) ────────
   Widget _buildSharedContactsCard(BuildContext context) {
     final contactsAsync = ref.watch(contactsProvider);
 
@@ -635,34 +830,20 @@ class _TripScreenState extends ConsumerState<TripScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(
-                'Shared Contacts',
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.bold,
-                    ),
-              ),
+              Text('Shared Contacts',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
               contactsAsync.when(
                 loading: () => const SizedBox.shrink(),
-                error: (_, _) => const SizedBox.shrink(),
+                error: (_, __) => const SizedBox.shrink(),
                 data: (contacts) => contacts.isEmpty
                     ? const SizedBox.shrink()
                     : Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 4),
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                         decoration: BoxDecoration(
-                          color: AppColors.lightPink,
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: Text(
-                          '${contacts.length} Active',
-                          style: Theme.of(context)
-                              .textTheme
-                              .labelSmall
-                              ?.copyWith(
-                                color: AppColors.primaryPink,
-                                fontWeight: FontWeight.bold,
-                              ),
-                        ),
+                            color: AppColors.lightPink, borderRadius: BorderRadius.circular(10)),
+                        child: Text('${contacts.length} Active',
+                            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                                color: AppColors.primaryPink, fontWeight: FontWeight.bold)),
                       ),
               ),
             ],
@@ -672,52 +853,30 @@ class _TripScreenState extends ConsumerState<TripScreen> {
             loading: () => const SizedBox(
               height: 70,
               child: Center(
-                child: CircularProgressIndicator(
-                  color: AppColors.primaryPink,
-                  strokeWidth: 2,
-                ),
-              ),
+                  child: CircularProgressIndicator(color: AppColors.primaryPink, strokeWidth: 2)),
             ),
-            error: (_, _) => Text(
-              'Could not load contacts.',
-              style: Theme.of(context)
-                  .textTheme
-                  .bodySmall
-                  ?.copyWith(color: AppColors.textGrey),
-            ),
+            error: (_, __) => Text('Could not load contacts.',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(color: AppColors.textGrey)),
             data: (contacts) {
               if (contacts.isEmpty) {
-                return Text(
-                  'No emergency contacts added yet.',
-                  style: Theme.of(context)
-                      .textTheme
-                      .bodySmall
-                      ?.copyWith(color: AppColors.textGrey),
-                );
+                return Text('No emergency contacts added yet.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(color: AppColors.textGrey));
               }
               final visible = contacts.take(4).toList();
               return Row(
                 children: [
-                  ...visible.map(
-                    (c) => Padding(
-                      padding: const EdgeInsets.only(right: 12),
-                      child: _buildContactAvatar(c),
-                    ),
-                  ),
+                  ...visible.map((c) => Padding(
+                      padding: const EdgeInsets.only(right: 12), child: _buildContactAvatar(c))),
                   if (contacts.length < 4)
                     GestureDetector(
                       onTap: () => context.go('/contacts'),
                       child: Column(
                         children: [
                           Container(
-                            width: 50,
-                            height: 50,
+                            width: 50, height: 50,
                             decoration: BoxDecoration(
-                              color: Colors.grey.shade200,
-                              shape: BoxShape.circle,
-                            ),
-                            child: const Icon(Icons.add,
-                                color: AppColors.textGrey),
+                                color: Colors.grey.shade200, shape: BoxShape.circle),
+                            child: const Icon(Icons.add, color: AppColors.textGrey),
                           ),
                           const SizedBox(height: 4),
                           const Text('', style: TextStyle(fontSize: 12)),
@@ -733,12 +892,9 @@ class _TripScreenState extends ConsumerState<TripScreen> {
     );
   }
 
-  // ── Contact avatar — initials only ────────────────────────────────────────
   Widget _buildContactAvatar(Contact contact) {
-    final initial =
-        contact.name.isNotEmpty ? contact.name[0].toUpperCase() : '?';
+    final initial   = contact.name.isNotEmpty ? contact.name[0].toUpperCase() : '?';
     final shortName = contact.name.split(' ').first;
-
     return Column(
       children: [
         Container(
@@ -750,21 +906,13 @@ class _TripScreenState extends ConsumerState<TripScreen> {
           child: CircleAvatar(
             radius: 22,
             backgroundColor: AppColors.lightPink,
-            child: Text(
-              initial,
-              style: const TextStyle(
-                color: AppColors.primaryPink,
-                fontWeight: FontWeight.bold,
-                fontSize: 16,
-              ),
-            ),
+            child: Text(initial,
+                style: const TextStyle(
+                    color: AppColors.primaryPink, fontWeight: FontWeight.bold, fontSize: 16)),
           ),
         ),
         const SizedBox(height: 4),
-        Text(
-          shortName,
-          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
-        ),
+        Text(shortName, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
       ],
     );
   }
