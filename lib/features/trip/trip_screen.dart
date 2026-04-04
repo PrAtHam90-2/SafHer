@@ -15,6 +15,7 @@ import '../../core/constants/app_constants.dart';
 import '../../models/contact.dart';
 import '../../services/contacts_service.dart';
 import '../../services/location_service.dart';
+import '../../services/risk_engine.dart';            // ← NEW
 import '../../services/routing_service.dart';
 import '../../services/trip_provider.dart';
 import '../../services/verification_service.dart';
@@ -89,12 +90,24 @@ class _TripScreenState extends ConsumerState<TripScreen> {
     });
     // Clear source in provider so hasSource returns false
     ref.read(tripProvider.notifier).setSource(0, 0, label: '');
-    if (_dest != null && _userPosition != null) _fetchRoute();
+    if (_dest != null) _fetchRoute();
+  }
+
+  // ── Clear destination ──────────────────────────────────────────────────────
+  void _clearDestination() {
+    setState(() {
+      _dest          = null;
+      _routePolyline = [];
+      _etaMinutes    = null;
+    });
+    ref.read(tripProvider.notifier).setDestination(0, 0, label: '');
   }
 
   // ── Fetch OSRM route ──────────────────────────────────────────────────────
   Future<void> _fetchRoute() async {
-    final origin = _source ?? _userPosition;
+    // Always prefer the explicitly-set source; fall back to live GPS.
+    // Both source and destination must be known before calling OSRM.
+    final origin = _sourceSetManually ? _source : _userPosition;
     if (origin == null || _dest == null) return;
 
     setState(() { _isRouteLoading = true; });
@@ -203,8 +216,10 @@ class _TripScreenState extends ConsumerState<TripScreen> {
             if (ref.read(tripProvider).isTripActive) _tripPath.add(ll);
           });
 
-          // Fetch route once on first GPS fix if destination is already set
-          if (!_hasInitialGpsFix && _dest != null && !_sourceSetManually) {
+          // On first GPS fix: fetch route if destination is already set.
+          // Works for both GPS source (most common) and manual source
+          // (user picked source before GPS was ready).
+          if (!_hasInitialGpsFix && _dest != null) {
             _hasInitialGpsFix = true;
             _fetchRoute();
           }
@@ -225,6 +240,34 @@ class _TripScreenState extends ConsumerState<TripScreen> {
           backgroundColor: AppColors.primaryPink,
           behavior: SnackBarBehavior.floating,
           duration: const Duration(seconds: 4),
+        ));
+      });
+
+      // ── NEW: risk alert stream ──────────────────────────────────────────
+      // Fires only when risk escalates to High Risk or Critical for the first
+      // time — not on every GPS tick. Non-destructive: never auto-triggers SOS.
+      ref.read(tripProvider.notifier).riskAlertStream.listen((snapshot) {
+        if (!mounted) return;
+        final color = snapshot.level == RiskLevel.critical
+            ? const Color(0xFFB91C1C)  // deep red
+            : const Color(0xFFD97706); // amber
+        ScaffoldMessenger.of(context).clearSnackBars();
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Row(
+            children: [
+              const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 20),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  '${snapshot.level.label}: ${snapshot.reason}',
+                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
+          ),
+          backgroundColor: color,
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 5),
         ));
       });
     });
@@ -329,66 +372,97 @@ class _TripScreenState extends ConsumerState<TripScreen> {
                   ),
                 ),
                 // Destination picker
-                DestinationPickerCard(onDestinationChanged: _onDestinationChanged),
+                DestinationPickerCard(onDestinationChanged: _onDestinationChanged, onClear: _clearDestination),
               ],
             ),
           ),
 
-          // ── Scrollable content panel ──────────────────────────────────────
-          Positioned.fill(
-            top: MediaQuery.of(context).size.height * 0.35,
-            child: Container(
-              decoration: const BoxDecoration(
-                color: AppColors.background,
-                borderRadius: BorderRadius.only(
-                    topLeft: Radius.circular(32), topRight: Radius.circular(32)),
-              ),
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.only(top: 24, left: 16, right: 16, bottom: 100),
+          // ── Draggable bottom sheet ────────────────────────────────────────
+          // Snaps between 35% (map-first) and 75% (content-first).
+          // User drags the handle to show more map or more content.
+          DraggableScrollableSheet(
+            initialChildSize: 0.45,
+            minChildSize:     0.18,
+            maxChildSize:     0.82,
+            snap:             true,
+            snapSizes:        const [0.18, 0.45, 0.82],
+            builder: (_, scrollController) {
+              return Container(
+                decoration: const BoxDecoration(
+                  color: AppColors.background,
+                  borderRadius: BorderRadius.only(
+                      topLeft: Radius.circular(32), topRight: Radius.circular(32)),
+                  boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 16)],
+                ),
                 child: Column(
                   children: [
-                    _buildTripProgressCard(context, remainingKm, tripState),
-                    const SizedBox(height: 16),
-                    _buildDriverInfoCard(context),
-                    const SizedBox(height: 16),
-                    _buildSharedContactsCard(context),
+                    // ── Drag handle ──────────────────────────────────────────
+                    Padding(
+                      padding: const EdgeInsets.only(top: 10, bottom: 4),
+                      child: Container(
+                        width: 40, height: 4,
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade300,
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                    ),
+                    // ── SOS button (always visible at top of sheet) ──────────
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+                      child: Container(
+                        decoration: BoxDecoration(boxShadow: [
+                          BoxShadow(
+                              color: AppColors.primaryPink.withOpacity(0.25),
+                              blurRadius: 12,
+                              offset: const Offset(0, 4))
+                        ]),
+                        child: ElevatedButton(
+                          onPressed: () => context.go('/sos'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: AppColors.primaryPink,
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            minimumSize: const Size.fromHeight(48),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                          ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Text('SOS',
+                                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                      color: Colors.white, fontWeight: FontWeight.w900, letterSpacing: 2)),
+                              const SizedBox(width: 8),
+                              Text('EMERGENCY',
+                                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                      color: Colors.white, fontWeight: FontWeight.bold, letterSpacing: 1)),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    // ── Scrollable cards ─────────────────────────────────────
+                    Expanded(
+                      child: ListView(
+                        controller: scrollController,
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+                        children: [
+                          _buildTripProgressCard(context, remainingKm, tripState),
+                          if (tripState.isTripActive) ...[
+                            const SizedBox(height: 12),
+                            _buildRiskCard(context, tripState.risk),
+                          ],
+                          const SizedBox(height: 12),
+                          _buildDriverInfoCard(context),
+                          const SizedBox(height: 12),
+                          _buildSharedContactsCard(context),
+                        ],
+                      ),
+                    ),
                   ],
                 ),
-              ),
-            ),
-          ),
-
-          // ── SOS button ────────────────────────────────────────────────────
-          Positioned(
-            bottom: 32, left: 16, right: 16,
-            child: Container(
-              decoration: BoxDecoration(boxShadow: [
-                BoxShadow(
-                    color: AppColors.primaryPink.withOpacity(0.3),
-                    blurRadius: 20,
-                    offset: const Offset(0, 10))
-              ]),
-              child: ElevatedButton(
-                onPressed: () => context.go('/sos'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.primaryPink,
-                  padding: const EdgeInsets.symmetric(vertical: 20),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
-                ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text('SOS',
-                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                            color: Colors.white, fontWeight: FontWeight.w900, letterSpacing: 2)),
-                    const SizedBox(width: 8),
-                    Text('EMERGENCY',
-                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                            color: Colors.white, fontWeight: FontWeight.bold, letterSpacing: 1)),
-                  ],
-                ),
-              ),
-            ),
+              );
+            },
           ),
         ],
       ),
@@ -527,13 +601,13 @@ class _TripScreenState extends ConsumerState<TripScreen> {
             : '○ Trip Active: FALSE';
 
     return Container(
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: AppColors.cardWhite,
         borderRadius: BorderRadius.circular(AppConstants.borderRadius),
         boxShadow: [
           BoxShadow(
-              color: Colors.black.withOpacity(0.04), blurRadius: 16, offset: const Offset(0, 4))
+              color: Colors.black.withOpacity(0.04), blurRadius: 12, offset: const Offset(0, 3))
         ],
       ),
       child: Column(
@@ -570,7 +644,7 @@ class _TripScreenState extends ConsumerState<TripScreen> {
                 const Icon(LucideIcons.checkCircle2, color: AppColors.safeGreenDark, size: 28),
             ],
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 8),
 
           // Status pill
           Container(
@@ -611,7 +685,7 @@ class _TripScreenState extends ConsumerState<TripScreen> {
             ),
           ],
 
-          const SizedBox(height: 14),
+          const SizedBox(height: 10),
 
           // Progress bar
           Stack(
@@ -631,7 +705,7 @@ class _TripScreenState extends ConsumerState<TripScreen> {
               ),
             ],
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 6),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -644,7 +718,7 @@ class _TripScreenState extends ConsumerState<TripScreen> {
               Text('DESTINATION', style: Theme.of(context).textTheme.labelSmall),
             ],
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 10),
 
           // ── Action buttons ───────────────────────────────────────────────
           // IDLE: [Share Trip] [▶ Start Journey]
@@ -712,7 +786,7 @@ class _TripScreenState extends ConsumerState<TripScreen> {
                 Expanded(
                   child: ElevatedButton.icon(
                     onPressed: _endJourney,
-                    icon: const Icon(LucideIcons.x, size: 15),
+                    icon: const Icon(Icons.close, size: 15),
                     label: const Text('End Trip'),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: AppColors.primaryPink,
@@ -834,7 +908,7 @@ class _TripScreenState extends ConsumerState<TripScreen> {
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
               contactsAsync.when(
                 loading: () => const SizedBox.shrink(),
-                error: (_, __) => const SizedBox.shrink(),
+                error: (_, _) => const SizedBox.shrink(),
                 data: (contacts) => contacts.isEmpty
                     ? const SizedBox.shrink()
                     : Container(
@@ -855,7 +929,7 @@ class _TripScreenState extends ConsumerState<TripScreen> {
               child: Center(
                   child: CircularProgressIndicator(color: AppColors.primaryPink, strokeWidth: 2)),
             ),
-            error: (_, __) => Text('Could not load contacts.',
+            error: (_, _) => Text('Could not load contacts.',
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(color: AppColors.textGrey)),
             data: (contacts) {
               if (contacts.isEmpty) {
@@ -916,4 +990,149 @@ class _TripScreenState extends ConsumerState<TripScreen> {
       ],
     );
   }
+
+  // ── NEW: Live Risk Card ─────────────────────────────────────────────────
+  // Only rendered while isTripActive == true (see insertion point in build()).
+  // Layout: coloured left border + score badge + level label + reason text.
+
+  Widget _buildRiskCard(BuildContext context, RiskSnapshot risk) {
+    final cfg = _riskConfig(risk.level);
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: cfg.bg,
+        borderRadius: BorderRadius.circular(AppConstants.borderRadius),
+        border: Border(left: BorderSide(color: cfg.accent, width: 4)),
+        boxShadow: [
+          BoxShadow(
+            color: cfg.accent.withOpacity(0.08),
+            blurRadius: 12,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          // ── Score circle ─────────────────────────────────────────────
+          Container(
+            width: 50,
+            height: 50,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: cfg.accent,
+            ),
+            child: Center(
+              child: Text(
+                '${risk.score}',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w900,
+                  fontSize: 16,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 14),
+
+          // ── Text ──────────────────────────────────────────────────────
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(cfg.icon, color: cfg.accent, size: 15),
+                    const SizedBox(width: 5),
+                    Text(
+                      'RISK: ${risk.level.label.toUpperCase()}',
+                      style: TextStyle(
+                        color: cfg.accent,
+                        fontWeight: FontWeight.w900,
+                        fontSize: 12,
+                        letterSpacing: 0.6,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  risk.score == 0 ? 'Monitoring your journey' : risk.reason,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: AppColors.textDark,
+                        fontWeight: FontWeight.w500,
+                      ),
+                ),
+              ],
+            ),
+          ),
+
+          // ── Progress bar (vertical mini) ──────────────────────────────
+          Column(
+            children: [
+              Text(
+                '${risk.score}/100',
+                style: TextStyle(
+                  color: cfg.accent,
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 4),
+              SizedBox(
+                width: 40,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    value: risk.score / 100.0,
+                    minHeight: 6,
+                    backgroundColor: cfg.accent.withOpacity(0.15),
+                    valueColor: AlwaysStoppedAnimation<Color>(cfg.accent),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  _RiskConfig _riskConfig(RiskLevel level) {
+    switch (level) {
+      case RiskLevel.safe:
+        return _RiskConfig(
+          bg:     AppColors.safeGreenLight,
+          accent: AppColors.safeGreenDark,
+          icon:   Icons.shield_outlined,
+        );
+      case RiskLevel.caution:
+        return _RiskConfig(
+          bg:     const Color(0xFFFEF3C7), // amber-50
+          accent: AppColors.warningOrange,
+          icon:   Icons.warning_amber_outlined,
+        );
+      case RiskLevel.highRisk:
+        return _RiskConfig(
+          bg:     AppColors.alertBg,
+          accent: AppColors.primaryPink,
+          icon:   Icons.warning_rounded,
+        );
+      case RiskLevel.critical:
+        return _RiskConfig(
+          bg:     const Color(0xFFFEE2E2),
+          accent: const Color(0xFFB91C1C),
+          icon:   Icons.crisis_alert_rounded,
+        );
+    }
+  }
+}
+
+// ── Risk card styling helper ──────────────────────────────────────────────
+class _RiskConfig {
+  final Color   bg;
+  final Color   accent;
+  final IconData icon;
+  const _RiskConfig({required this.bg, required this.accent, required this.icon});
 }

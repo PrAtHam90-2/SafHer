@@ -2,9 +2,11 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:lucide_icons/lucide_icons.dart';
+import 'package:share_plus/share_plus.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/constants/app_constants.dart';
 import '../../services/verification_service.dart';
@@ -131,38 +133,24 @@ class _VerifyScreenState extends ConsumerState<VerifyScreen> {
     }
   }
 
-  // ── Start Journey ─────────────────────────────────────────────────────────
-  void _startJourney() {
-    ref.read(tripProvider.notifier).startTripManually();
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('🚗 Journey started. Monitoring route...'),
-        behavior: SnackBarBehavior.floating,
-        backgroundColor: AppColors.safeGreenDark,
-      ),
-    );
-  }
+  // ── Start Journey — navigates to Trip screen; trip logic stays there ────────
+  void _startJourney() => context.go('/trip');
 
-  // ── Share Trip ────────────────────────────────────────────────────────────
-  void _shareTrip() {
-    final tripState = ref.read(tripProvider);
-    final pos = tripState.currentPosition;
+  // ── Share Driver Details — shares visible verified data via share sheet ────
+  void _shareDriverDetails(VerificationData data) {
+    final status = data.driverStatus.badgeLabel.replaceAll('\n', ' ');
+    final text = '''🚗 SafHer — Verified Driver Details
 
-    final String mapLink;
-    if (pos != null) {
-      mapLink =
-          'https://www.google.com/maps?q=${pos.latitude},${pos.longitude}';
-    } else {
-      mapLink = 'https://www.google.com/maps';
-    }
+Driver : ${data.driverName}
+Vehicle : ${data.vehicleInfo}
+Licence : ${data.licenseNumber.isNotEmpty ? data.licenseNumber : 'N/A'}
+Phone   : ${data.phone.isNotEmpty ? data.phone : 'N/A'}
+Status  : $status
+Score   : ${data.safetyScore}/100
 
-    Clipboard.setData(ClipboardData(text: '🚨 Live Trip Tracking:\n$mapLink'));
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('📋 Trip link copied to clipboard!'),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
+Shared via SafHer Women's Safety App''';
+
+    Share.share(text, subject: 'SafHer — Verified Driver Info');
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -384,10 +372,13 @@ class _VerifyScreenState extends ConsumerState<VerifyScreen> {
           const SizedBox(height: 32),
           Row(
             children: [
-              // ── Share Trip ─────────────────────────────────────────────
+              // ── Share Driver Details ───────────────────────────────────
               Expanded(
-                child: ElevatedButton(
-                  onPressed: _shareTrip,
+                child: ElevatedButton.icon(
+                  onPressed: () => _shareDriverDetails(data),
+                  icon: const Icon(Icons.share_rounded, size: 17),
+                  label: const Text('Share Details',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppColors.buttonBlue,
                     foregroundColor: AppColors.buttonBlueText,
@@ -396,12 +387,10 @@ class _VerifyScreenState extends ConsumerState<VerifyScreen> {
                     shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(16)),
                   ),
-                  child: const Text('Share Trip',
-                      style: TextStyle(fontWeight: FontWeight.bold)),
                 ),
               ),
               const SizedBox(width: 16),
-              // ── Start Journey ──────────────────────────────────────────
+              // ── Go to Trip Screen ──────────────────────────────────────
               Expanded(
                 child: Stack(
                   clipBehavior: Clip.none,

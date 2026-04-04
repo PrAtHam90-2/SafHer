@@ -51,6 +51,7 @@ dependencies:
   share_plus: ^7.0.0
   http: ^1.2.0
   url_launcher: ^6.3.0
+  speech_to_text: ^7.0.0    # voice-activated SOS trigger
 
 dev_dependencies:
   flutter_test:

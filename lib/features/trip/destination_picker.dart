@@ -117,9 +117,14 @@ Future<List<NominatimResult>> searchPlaces(
 class DestinationPickerCard extends ConsumerStatefulWidget {
   final void Function(LatLng latLng, String label) onDestinationChanged;
 
+  /// Called when the user taps the × clear button.
+  /// If null, no clear button is shown.
+  final VoidCallback? onClear;
+
   const DestinationPickerCard({
     super.key,
     required this.onDestinationChanged,
+    this.onClear,
   });
 
   @override
@@ -158,11 +163,25 @@ class _DestinationPickerCardState
                     overflow: TextOverflow.ellipsis),
               ]),
             ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              decoration: BoxDecoration(color: AppColors.lightPink, borderRadius: BorderRadius.circular(20)),
-              child: const Icon(LucideIcons.search, color: AppColors.primaryPink, size: 16),
-            ),
+            // Clear button when dest is set; search icon otherwise
+            if (widget.onClear != null && _destLabel != 'Tap to set destination')
+              GestureDetector(
+                onTap: () {
+                  widget.onClear!();
+                  setState(() => _destLabel = 'Tap to set destination');
+                },
+                child: Container(
+                  padding: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(color: Colors.grey.shade200, shape: BoxShape.circle),
+                  child: const Icon(Icons.close, color: AppColors.textGrey, size: 14),
+                ),
+              )
+            else
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(color: AppColors.lightPink, borderRadius: BorderRadius.circular(20)),
+                child: const Icon(LucideIcons.search, color: AppColors.primaryPink, size: 16),
+              ),
           ],
         ),
       ),
