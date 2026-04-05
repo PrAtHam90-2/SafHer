@@ -27,7 +27,7 @@ class HomeScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final user       = ref.watch(authStateProvider).value;
-    final firstName  = _extractFirstName(user?.displayName);
+    final firstName  = _extractFirstName(user?.displayName, user?.email);
     final trip       = ref.watch(tripProvider);
     final historyAsync = ref.watch(tripHistoryProvider); // ← NEW
 
@@ -96,9 +96,18 @@ class HomeScreen extends ConsumerWidget {
     );
   }
 
-  static String _extractFirstName(String? displayName) {
-    if (displayName == null || displayName.trim().isEmpty) return 'there';
-    return displayName.trim().split(' ').first;
+  static String _extractFirstName(String? displayName, String? email) {
+    if (displayName != null && displayName.trim().isNotEmpty) {
+      final name = displayName.trim().split(' ').first;
+      return name[0].toUpperCase() + name.substring(1);
+    }
+    if (email != null && email.contains('@')) {
+      final raw = email.split('@').first.trim();
+      if (raw.isNotEmpty) {
+        return raw[0].toUpperCase() + raw.substring(1).toLowerCase();
+      }
+    }
+    return 'User';
   }
 
   // ── Status card — unchanged logic ─────────────────────────────────────────

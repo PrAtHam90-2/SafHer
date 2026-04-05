@@ -477,13 +477,12 @@ class _PanicScreenState extends ConsumerState<PanicScreen> {
           // ── Toggle / retry control ──────────────────────────────────────
           if (!error && !triggered)
             Switch(
-              // Bound to userEnabled so switch stays on after navigation.
-              value:    voiceState.userEnabled || listening || init,
+              value:    listening || init,
               onChanged: init
                   ? null
                   : (_) =>
                       ref.read(voiceSosProvider.notifier).toggleListening(),
-              activeColor: AppColors.primaryPink,
+              activeThumbColor: AppColors.primaryPink,
               materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
             )
           else if (error)
@@ -509,7 +508,7 @@ class _PanicScreenState extends ConsumerState<PanicScreen> {
   }
 
   String _voiceStatusLabel(VoiceSosState vs) => switch (vs.status) {
-        VoiceSosStatus.idle          => 'Toggle on to enable voice activation',
+        VoiceSosStatus.idle          => 'Tap to enable voice activation',
         VoiceSosStatus.initializing  => 'Requesting microphone access…',
         VoiceSosStatus.listening     => 'Listening for emergency phrase…',
         VoiceSosStatus.permissionDenied =>
@@ -559,12 +558,6 @@ class _PanicScreenState extends ConsumerState<PanicScreen> {
         const SizedBox(height: 12),
         _buildProtocolItem(
             context, 'Emergency contacts alerted via SMS', LucideIcons.users),
-        const SizedBox(height: 12),
-        _buildProtocolItem(
-            context, 'Nearest police station notified', LucideIcons.shieldAlert),
-        const SizedBox(height: 12),
-        _buildProtocolItem(
-            context, 'Continuous audio recording starts', LucideIcons.mic),
       ],
     );
   }

@@ -80,34 +80,22 @@ class AlertService {
 
   Future<SosResult> triggerSOS() async {
     // ── Step 1: Obtain current GPS position ─────────────────────────────────
-    // Strategy: try a fresh high-accuracy fix (15 s timeout).
-    // If that times out or fails, fall back to lastKnownPosition which
-    // may be a few minutes old but is always better than nothing.
-    // The Google Maps link remains valid as long as the user is nearby —
-    // at SOS time we share a snapshot that contacts can open immediately.
     String locationLink = '';
     try {
       final permission = await Geolocator.checkPermission();
       if (permission != LocationPermission.denied &&
           permission != LocationPermission.deniedForever) {
-        Position? position;
-        try {
-          position = await Geolocator.getCurrentPosition(
-            locationSettings: const LocationSettings(
-              accuracy: LocationAccuracy.high,
-            ),
-          ).timeout(const Duration(seconds: 15));
-        } catch (_) {
-          // Timed out or GPS not ready — use the last known position.
-          position = await Geolocator.getLastKnownPosition();
-        }
+        final position = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.high,
+          ),
+        ).timeout(const Duration(seconds: 15));
 
-        if (position != null) {
-          locationLink =
-              'https://www.google.com/maps?q=${position.latitude},${position.longitude}';
-        }
+        locationLink =
+            'https://www.google.com/maps?q=${position.latitude},${position.longitude}';
       }
     } catch (e) {
+      // Location unavailable — SMS still fires, just without a maps link.
       debugPrint('AlertService: location unavailable — $e');
     }
 
@@ -297,6 +285,7 @@ class AlertService {
           'successCount':  results.where((r) => r.success).length,
         })
         .catchError((e) =>
+            // ignore: invalid_return_type_for_catch_error
             debugPrint('AlertService: failed to persist alert — $e'));
   }
 }

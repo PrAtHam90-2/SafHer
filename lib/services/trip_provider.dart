@@ -87,6 +87,18 @@ class TripState {
     );
   }
 
+  /// Total distance from the trip's GPS start position to the destination.
+  /// Used as the denominator for progress calculation:
+  ///   progress = 1 - (remainingDistance / totalDistance)
+  /// Null when trip has not started or no destination is set.
+  double? get totalDistanceMetres {
+    if (startPosition == null || !hasDestination) return null;
+    return Geolocator.distanceBetween(
+      startPosition!.latitude, startPosition!.longitude,
+      destinationLat,           destinationLng,
+    );
+  }
+
   double? get deviationFromRouteMetres {
     if (currentPosition == null || startPosition == null) return null;
     const metersPerDegLat = 111320.0;

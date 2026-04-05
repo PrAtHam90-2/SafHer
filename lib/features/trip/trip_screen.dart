@@ -90,24 +90,12 @@ class _TripScreenState extends ConsumerState<TripScreen> {
     });
     // Clear source in provider so hasSource returns false
     ref.read(tripProvider.notifier).setSource(0, 0, label: '');
-    if (_dest != null) _fetchRoute();
-  }
-
-  // ── Clear destination ──────────────────────────────────────────────────────
-  void _clearDestination() {
-    setState(() {
-      _dest          = null;
-      _routePolyline = [];
-      _etaMinutes    = null;
-    });
-    ref.read(tripProvider.notifier).setDestination(0, 0, label: '');
+    if (_dest != null && _userPosition != null) _fetchRoute();
   }
 
   // ── Fetch OSRM route ──────────────────────────────────────────────────────
   Future<void> _fetchRoute() async {
-    // Always prefer the explicitly-set source; fall back to live GPS.
-    // Both source and destination must be known before calling OSRM.
-    final origin = _sourceSetManually ? _source : _userPosition;
+    final origin = _source ?? _userPosition;
     if (origin == null || _dest == null) return;
 
     setState(() { _isRouteLoading = true; });
@@ -188,7 +176,7 @@ class _TripScreenState extends ConsumerState<TripScreen> {
   void _shareTrip() {
     if (_userPosition != null) {
       final link = 'https://www.google.com/maps?q=${_userPosition!.latitude},${_userPosition!.longitude}';
-      Share.share('🚨 Live Trip Tracking:\n$link', subject: 'SafHer Live Trip');
+      Share.share('🚨 Live Trip Tracking:\n$link', subject: 'SaveHer Live Trip');
     } else {
       Clipboard.setData(const ClipboardData(text: 'https://www.google.com/maps'));
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
@@ -216,10 +204,8 @@ class _TripScreenState extends ConsumerState<TripScreen> {
             if (ref.read(tripProvider).isTripActive) _tripPath.add(ll);
           });
 
-          // On first GPS fix: fetch route if destination is already set.
-          // Works for both GPS source (most common) and manual source
-          // (user picked source before GPS was ready).
-          if (!_hasInitialGpsFix && _dest != null) {
+          // Fetch route once on first GPS fix if destination is already set
+          if (!_hasInitialGpsFix && _dest != null && !_sourceSetManually) {
             _hasInitialGpsFix = true;
             _fetchRoute();
           }
@@ -289,9 +275,17 @@ class _TripScreenState extends ConsumerState<TripScreen> {
   Widget build(BuildContext context) {
     final tripState = ref.watch(tripProvider);
 
+    // Remaining: current GPS position → destination (updates on every fix)
     final double? remainingKm = tripState.hasDestination &&
             tripState.distanceToDestinationMetres != null
         ? tripState.distanceToDestinationMetres! / 1000.0
+        : null;
+
+    // Total: recorded trip start position → destination (fixed at trip start)
+    // Falls back to OSRM route distance if start position not yet captured.
+    final double? totalKm = tripState.isTripActive &&
+            tripState.totalDistanceMetres != null
+        ? tripState.totalDistanceMetres! / 1000.0
         : null;
 
     ref.listen<TripState>(tripProvider, (previous, next) {
@@ -325,7 +319,7 @@ class _TripScreenState extends ConsumerState<TripScreen> {
           children: [
             const Icon(LucideIcons.shield, color: AppColors.primaryPink),
             const SizedBox(width: 8),
-            Text('SafHer',
+            Text('SaveHer',
                 style: Theme.of(context).textTheme.titleLarge?.copyWith(
                     color: AppColors.primaryPink,
                     fontWeight: FontWeight.w800,
@@ -372,97 +366,71 @@ class _TripScreenState extends ConsumerState<TripScreen> {
                   ),
                 ),
                 // Destination picker
-                DestinationPickerCard(onDestinationChanged: _onDestinationChanged, onClear: _clearDestination),
+                DestinationPickerCard(onDestinationChanged: _onDestinationChanged),
               ],
             ),
           ),
 
-          // ── Draggable bottom sheet ────────────────────────────────────────
-          // Snaps between 35% (map-first) and 75% (content-first).
-          // User drags the handle to show more map or more content.
-          DraggableScrollableSheet(
-            initialChildSize: 0.45,
-            minChildSize:     0.18,
-            maxChildSize:     0.82,
-            snap:             true,
-            snapSizes:        const [0.18, 0.45, 0.82],
-            builder: (_, scrollController) {
-              return Container(
-                decoration: const BoxDecoration(
-                  color: AppColors.background,
-                  borderRadius: BorderRadius.only(
-                      topLeft: Radius.circular(32), topRight: Radius.circular(32)),
-                  boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 16)],
-                ),
+          // ── Scrollable content panel ──────────────────────────────────────
+          Positioned.fill(
+            top: MediaQuery.of(context).size.height * 0.35,
+            child: Container(
+              decoration: const BoxDecoration(
+                color: AppColors.background,
+                borderRadius: BorderRadius.only(
+                    topLeft: Radius.circular(32), topRight: Radius.circular(32)),
+              ),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.only(top: 24, left: 16, right: 16, bottom: 100),
                 child: Column(
                   children: [
-                    // ── Drag handle ──────────────────────────────────────────
-                    Padding(
-                      padding: const EdgeInsets.only(top: 10, bottom: 4),
-                      child: Container(
-                        width: 40, height: 4,
-                        decoration: BoxDecoration(
-                          color: Colors.grey.shade300,
-                          borderRadius: BorderRadius.circular(2),
-                        ),
-                      ),
-                    ),
-                    // ── SOS button (always visible at top of sheet) ──────────
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
-                      child: Container(
-                        decoration: BoxDecoration(boxShadow: [
-                          BoxShadow(
-                              color: AppColors.primaryPink.withOpacity(0.25),
-                              blurRadius: 12,
-                              offset: const Offset(0, 4))
-                        ]),
-                        child: ElevatedButton(
-                          onPressed: () => context.go('/sos'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: AppColors.primaryPink,
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                            minimumSize: const Size.fromHeight(48),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-                          ),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Text('SOS',
-                                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                                      color: Colors.white, fontWeight: FontWeight.w900, letterSpacing: 2)),
-                              const SizedBox(width: 8),
-                              Text('EMERGENCY',
-                                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                                      color: Colors.white, fontWeight: FontWeight.bold, letterSpacing: 1)),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    // ── Scrollable cards ─────────────────────────────────────
-                    Expanded(
-                      child: ListView(
-                        controller: scrollController,
-                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
-                        children: [
-                          _buildTripProgressCard(context, remainingKm, tripState),
-                          if (tripState.isTripActive) ...[
-                            const SizedBox(height: 12),
-                            _buildRiskCard(context, tripState.risk),
-                          ],
-                          const SizedBox(height: 12),
-                          _buildDriverInfoCard(context),
-                          const SizedBox(height: 12),
-                          _buildSharedContactsCard(context),
-                        ],
-                      ),
-                    ),
+                    _buildTripProgressCard(context, remainingKm, totalKm, tripState),
+                    // ── NEW: live risk card (only visible during active trip) ──
+                    if (tripState.isTripActive) ...[
+                      const SizedBox(height: 16),
+                      _buildRiskCard(context, tripState.risk),
+                    ],
+                    const SizedBox(height: 16),
+                    _buildDriverInfoCard(context),
+                    const SizedBox(height: 16),
+                    _buildSharedContactsCard(context),
                   ],
                 ),
-              );
-            },
+              ),
+            ),
+          ),
+
+          // ── SOS button ────────────────────────────────────────────────────
+          Positioned(
+            bottom: 32, left: 16, right: 16,
+            child: Container(
+              decoration: BoxDecoration(boxShadow: [
+                BoxShadow(
+                    color: AppColors.primaryPink.withOpacity(0.3),
+                    blurRadius: 20,
+                    offset: const Offset(0, 10))
+              ]),
+              child: ElevatedButton(
+                onPressed: () => context.go('/sos'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.primaryPink,
+                  padding: const EdgeInsets.symmetric(vertical: 20),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text('SOS',
+                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            color: Colors.white, fontWeight: FontWeight.w900, letterSpacing: 2)),
+                    const SizedBox(width: 8),
+                    Text('EMERGENCY',
+                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            color: Colors.white, fontWeight: FontWeight.bold, letterSpacing: 1)),
+                  ],
+                ),
+              ),
+            ),
           ),
         ],
       ),
@@ -580,13 +548,24 @@ class _TripScreenState extends ConsumerState<TripScreen> {
   Widget _buildTripProgressCard(
     BuildContext context,
     double? remainingKm,
+    double? totalKm,       // ← total distance from trip start → destination
     TripState tripState,
   ) {
     final bool hasDestination = tripState.hasDestination;
-    final double distance     = remainingKm ?? 0.0;
-    const double maxDist      = 10.0;
-    final double progress     = hasDestination && distance <= maxDist
-        ? ((maxDist - distance) / maxDist).clamp(0.0, 1.0)
+    final double remaining    = remainingKm ?? 0.0;
+
+    // Progress = how much of the trip has been covered.
+    // Uses totalKm (start→dest) as the fixed baseline once the trip begins.
+    // Falls back to OSRM ETA-route distance if totalKm not yet available.
+    // Always clamped 0–1 so the bar never goes backwards or over 100%.
+    final double etaRouteKm = (_etaMinutes != null && _etaMinutes! > 0)
+        ? remaining  // ETA already reflects remaining — use as denominator proxy
+        : 0.0;
+    final double baseDist = (totalKm ?? 0.0) > 0.01
+        ? totalKm!
+        : etaRouteKm;
+    final double progress = (hasDestination && baseDist > 0.01)
+        ? (1.0 - (remaining / baseDist)).clamp(0.0, 1.0)
         : 0.0;
 
     final bool isActive = tripState.isTripActive;
@@ -601,13 +580,13 @@ class _TripScreenState extends ConsumerState<TripScreen> {
             : '○ Trip Active: FALSE';
 
     return Container(
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         color: AppColors.cardWhite,
         borderRadius: BorderRadius.circular(AppConstants.borderRadius),
         boxShadow: [
           BoxShadow(
-              color: Colors.black.withOpacity(0.04), blurRadius: 12, offset: const Offset(0, 3))
+              color: Colors.black.withOpacity(0.04), blurRadius: 16, offset: const Offset(0, 4))
         ],
       ),
       child: Column(
@@ -626,7 +605,7 @@ class _TripScreenState extends ConsumerState<TripScreen> {
                     const SizedBox(height: 4),
                     Text(
                       hasDestination
-                          ? '${distance.toStringAsFixed(1)} km remaining to safety'
+                          ? '${remaining.toStringAsFixed(1)} km remaining to safety'
                           : 'Set source and destination above',
                       style: Theme.of(context).textTheme.bodyMedium,
                     ),
@@ -644,7 +623,7 @@ class _TripScreenState extends ConsumerState<TripScreen> {
                 const Icon(LucideIcons.checkCircle2, color: AppColors.safeGreenDark, size: 28),
             ],
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 10),
 
           // Status pill
           Container(
@@ -685,7 +664,7 @@ class _TripScreenState extends ConsumerState<TripScreen> {
             ),
           ],
 
-          const SizedBox(height: 10),
+          const SizedBox(height: 14),
 
           // Progress bar
           Stack(
@@ -705,7 +684,7 @@ class _TripScreenState extends ConsumerState<TripScreen> {
               ),
             ],
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 10),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -718,7 +697,7 @@ class _TripScreenState extends ConsumerState<TripScreen> {
               Text('DESTINATION', style: Theme.of(context).textTheme.labelSmall),
             ],
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 16),
 
           // ── Action buttons ───────────────────────────────────────────────
           // IDLE: [Share Trip] [▶ Start Journey]
