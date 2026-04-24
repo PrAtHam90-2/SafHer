@@ -10,6 +10,7 @@
 //   • Delete shows a confirmation dialog to prevent accidental removal.
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 
@@ -180,6 +181,9 @@ class ContactsScreen extends ConsumerWidget {
             TextField(
               controller: nameCtrl,
               textCapitalization: TextCapitalization.words,
+              inputFormatters: [
+                LengthLimitingTextInputFormatter(50),
+              ],
               decoration: InputDecoration(
                 labelText: 'Name',
                 prefixIcon: const Icon(Icons.person_outline_rounded),
@@ -191,6 +195,10 @@ class ContactsScreen extends ConsumerWidget {
             TextField(
               controller: phoneCtrl,
               keyboardType: TextInputType.phone,
+              inputFormatters: [
+                LengthLimitingTextInputFormatter(15),
+                FilteringTextInputFormatter.allow(RegExp(r'[\d+\-\s()]')),
+              ],
               decoration: InputDecoration(
                 labelText: 'Phone number',
                 prefixIcon: const Icon(Icons.phone_outlined),
@@ -207,11 +215,33 @@ class ContactsScreen extends ConsumerWidget {
           ),
           ElevatedButton(
             onPressed: () async {
+              final name  = nameCtrl.text.trim();
+              final phone = phoneCtrl.text.trim();
+
+              // Validate name
+              if (name.length < 2) {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                  content: Text('Name must be at least 2 characters.'),
+                  behavior: SnackBarBehavior.floating,
+                ));
+                return;
+              }
+
+              // Validate phone: strip formatting chars, check digit count
+              final digits = phone.replaceAll(RegExp(r'[\s\-\(\)]'), '');
+              if (!RegExp(r'^\+?\d{7,15}$').hasMatch(digits)) {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                  content: Text('Enter a valid phone number (7–15 digits).'),
+                  behavior: SnackBarBehavior.floating,
+                ));
+                return;
+              }
+
               Navigator.pop(ctx);
               try {
                 await ref
                     .read(contactsProvider.notifier)
-                    .add(nameCtrl.text, phoneCtrl.text);
+                    .add(name, phone);
               } catch (_) {
                 if (context.mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(

@@ -96,19 +96,29 @@ class HomeScreen extends ConsumerWidget {
     );
   }
 
-  static String _extractFirstName(String? displayName, String? email) {
-    if (displayName != null && displayName.trim().isNotEmpty) {
-      final name = displayName.trim().split(' ').first;
-      return name[0].toUpperCase() + name.substring(1);
-    }
-    if (email != null && email.contains('@')) {
-      final raw = email.split('@').first.trim();
-      if (raw.isNotEmpty) {
-        return raw[0].toUpperCase() + raw.substring(1).toLowerCase();
-      }
-    }
-    return 'User';
+static String _extractFirstName(String? displayName, String? email) {
+  // Prefer Firebase display name (set for Google sign-in)
+  if (displayName != null && displayName.trim().isNotEmpty) {
+    return displayName.split(' ').first;
   }
+
+  // Fall back to email
+  if (email != null && email.contains('@')) {
+    String raw = email.split('@')[0];          // "arnavjhodge"
+    // Split on common separators first
+    final parts = raw.split(RegExp(r'[._\-]'));
+    raw = parts.first;                          // "arnavjhodge" if no separator
+
+    // Cap at 10 chars so run-together handles don't look odd
+    if (raw.length > 10) raw = raw.substring(0, 10);
+
+    if (raw.isNotEmpty) {
+      return raw[0].toUpperCase() + raw.substring(1).toLowerCase();
+    }
+  }
+
+  return 'User';
+}
 
   // ── Status card — unchanged logic ─────────────────────────────────────────
   Widget _buildStatusCard(BuildContext context, TripState trip) {

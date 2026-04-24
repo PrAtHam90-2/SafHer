@@ -1,5 +1,6 @@
 // lib/services/alert_service.dart
 
+import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
@@ -75,6 +76,106 @@ class AlertService {
     FirebaseAuth? auth,
   })  : _db = firestore ?? FirebaseFirestore.instance,
         _auth = auth ?? FirebaseAuth.instance;
+
+  // ── Live location tracking ─────────────────────────────────────────────────
+
+  static const Duration _kTrackingInterval = Duration(seconds: 30);
+  static const Duration _kTrackingDuration = Duration(minutes: 15);
+
+  Timer? _liveTrackingTimer;
+
+  /// True while a 15-minute live-tracking session is running.
+  bool get isTracking => _liveTrackingTimer?.isActive ?? false;
+
+  /// Builds a Google Maps link for the given coordinates.
+  static String generateMapLink(double lat, double lng) =>
+      'https://www.google.com/maps?q=$lat,$lng';
+
+  /// Starts a live-tracking session.
+  ///
+  /// - Sends a location update every 30 seconds.
+  /// - Automatically stops after 15 minutes.
+  /// - Safe to call multiple times — only one session runs at a time.
+  void startLiveTrackingSession() {
+    if (_liveTrackingTimer != null) return; // session already running
+
+    // Fire one update immediately, then repeat every 30 s.
+    _sendLiveUpdate();
+    _liveTrackingTimer = Timer.periodic(_kTrackingInterval, (_) {
+      _sendLiveUpdate();
+    });
+
+    // Auto-stop after 15 minutes.
+    Future.delayed(_kTrackingDuration, stopLiveTrackingSession);
+  }
+
+  /// Cancels the live-tracking session immediately.
+  /// Safe to call even when no session is running.
+  void stopLiveTrackingSession() {
+    _liveTrackingTimer?.cancel();
+    _liveTrackingTimer = null;
+    debugPrint('AlertService: live tracking stopped');
+  }
+
+  /// Fire-and-forget: fetch location → build message → send to all contacts.
+  /// Errors are caught and logged silently — never crash the app.
+  Future<void> _sendLiveUpdate() async {
+    // ── Get current position ──────────────────────────────────────────────
+    String link = '';
+    try {
+      final perm = await Geolocator.checkPermission();
+      if (perm != LocationPermission.denied &&
+          perm != LocationPermission.deniedForever) {
+        Position? position;
+        try {
+          position = await Geolocator.getCurrentPosition(
+            locationSettings: const LocationSettings(
+              accuracy: LocationAccuracy.high,
+            ),
+          ).timeout(const Duration(seconds: 10));
+        } catch (_) {
+          position = await Geolocator.getLastKnownPosition();
+        }
+        if (position != null) {
+          link = generateMapLink(position.latitude, position.longitude);
+        }
+      }
+    } catch (e) {
+      debugPrint('AlertService [live]: location failed — $e');
+    }
+
+    if (link.isEmpty) return; // skip this tick if no location
+
+    await sendLiveLocationUpdate(link);
+  }
+
+  /// Sends a live location update message to all emergency contacts.
+  /// Exposed publicly so it can also be called on-demand (e.g., Share Trip).
+  Future<void> sendLiveLocationUpdate(String link) async {
+    final uid = _auth.currentUser?.uid;
+    if (uid == null) return;
+
+    List<Contact> contacts = [];
+    try {
+      final snap = await _db
+          .collection('users')
+          .doc(uid)
+          .collection('contacts')
+          .get();
+      contacts = snap.docs
+          .map((d) => Contact.fromFirestore(d.id, d.data()))
+          .toList();
+    } catch (e) {
+      debugPrint('AlertService [live]: failed to fetch contacts — $e');
+      return;
+    }
+
+    if (contacts.isEmpty) return;
+
+    final message = '📍 Live Location Update:\nTrack here: $link';
+    await _launchSms(contacts: contacts, message: message);
+    debugPrint('AlertService [live]: location update sent');
+  }
 
   // ── Main entry point ───────────────────────────────────────────────────────
 
@@ -156,6 +257,10 @@ class AlertService {
         usedCombinedUri: usedCombined,
       );
     }
+
+    // ── Step 6: Start live-tracking session ────────────────────────────────
+    // Runs in the background for 15 min, sending location updates every 30 s.
+    startLiveTrackingSession();
 
     return SosResult(
       locationLink:    locationLink,
@@ -285,7 +390,6 @@ class AlertService {
           'successCount':  results.where((r) => r.success).length,
         })
         .catchError((e) =>
-            // ignore: invalid_return_type_for_catch_error
             debugPrint('AlertService: failed to persist alert — $e'));
   }
 }

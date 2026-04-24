@@ -55,6 +55,9 @@ class ContactsNotifier extends AsyncNotifier<List<Contact>> {
     final trimmedPhone = phone.trim();
     if (trimmedName.isEmpty || trimmedPhone.isEmpty) return;
 
+    // Defense-in-depth: reject oversized strings even if UI validation is bypassed.
+    if (trimmedName.length > 50 || trimmedPhone.length > 15) return;
+
     // Optimistic: add a temp entry with a placeholder id so the UI updates
     // instantly (replaces it once the Firestore write returns the real docId).
     final tempId = 'temp_${DateTime.now().millisecondsSinceEpoch}';

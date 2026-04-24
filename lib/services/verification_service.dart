@@ -1,5 +1,6 @@
 import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 // ============================================================================
@@ -168,11 +169,22 @@ class VerificationService {
 
   Future<VerificationData> verifyByVehicleNumber(String rawInput) async {
     final vehicleNumber = rawInput.trim().toUpperCase();
-    final doc = await _db.collection('drivers').doc(vehicleNumber).get();
-    if (!doc.exists || doc.data() == null) {
-      return VerificationData.notFound(vehicleNumber);
+
+    // Reject empty or implausibly long input — no Firestore round-trip needed.
+    if (vehicleNumber.isEmpty || vehicleNumber.length > 20) {
+      return VerificationData.notFound(vehicleNumber.isEmpty ? 'INVALID' : vehicleNumber);
     }
-    return VerificationData.fromFirestore(vehicleNumber, doc.data()!);
+
+    try {
+      final doc = await _db.collection('drivers').doc(vehicleNumber).get();
+      if (!doc.exists || doc.data() == null) {
+        return VerificationData.notFound(vehicleNumber);
+      }
+      return VerificationData.fromFirestore(vehicleNumber, doc.data()!);
+    } catch (e) {
+      debugPrint('VerificationService: Firestore query failed');
+      rethrow; // surfaces as AsyncError in VerifyNotifier
+    }
   }
 }
 

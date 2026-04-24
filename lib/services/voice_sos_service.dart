@@ -208,11 +208,11 @@ class VoiceSosService {
     // the engine commits to a "final" transcription.
     final words = result.recognizedWords.toLowerCase().trim();
     if (words.isEmpty) return;
-    debugPrint('VoiceSosService: recognised → "$words"');
+    debugPrint('VoiceSosService: processing recognition result');
 
     for (final phrase in _kTriggerPhrases) {
       if (words.contains(phrase)) {
-        debugPrint('VoiceSosService: keyword match → "$phrase"');
+        debugPrint('VoiceSosService: trigger phrase matched');
         // Stop immediately — one trigger per session.
         _wantListening = false;
         onKeywordDetected(phrase);

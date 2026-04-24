@@ -24,6 +24,7 @@ class AuthService {
     // Opens the Google account picker using Firebase's native flow.
     // Works on Android/iOS without the google_sign_in package.
     await _auth.signInWithProvider(googleProvider);
+    await FirebaseAuth.instance.currentUser?.reload();
   }
 
   Future<void> signOut() async {

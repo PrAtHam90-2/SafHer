@@ -1,0 +1,139 @@
+rules_version = '2';
+
+// ============================================================================
+//  SafHer — Firestore Security Rules
+//
+//  Collections and access model
+//  ─────────────────────────────
+//  users/{uid}/contacts/{contactId}
+//    • read, write  → owner only (request.auth.uid == uid)
+//    • field rules  → name (string ≤50), phone (string ≤15) required on create
+//
+//  users/{uid}/alerts/{alertId}
+//    • read, create → owner only
+//    • update/delete → denied (alert log is immutable)
+//    • field rules  → timestamp, locationLink, totalContacts, successCount required
+//
+//  users/{uid}/trips/{tripId}
+//    • read, create → owner only
+//    • update/delete → denied (trip log is immutable)
+//    • field rules  → startedAt, endedAt, coordinate fields required on create
+//
+//  users/{uid}/settings/{docId}
+//    • read, write  → owner only
+//    • field rules  → voiceSosEnabled (bool) validated on write
+//
+//  drivers/{vehicleNumber}
+//    • read          → any authenticated user (public driver registry)
+//    • write         → denied from client (managed via Admin SDK / console only)
+//
+//  Catch-all
+//    • Everything else → deny all
+// ============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helper functions ────────────────────────────────────────────────────
+
+    /// True when the requester is signed in and owns the resource path uid.
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    /// True when the incoming field value is a non-empty string within maxLen.
+    function validString(value, maxLen) {
+      return value is string
+          && value.size() > 0
+          && value.size() <= maxLen;
+    }
+
+    // ── users/{uid}/** ──────────────────────────────────────────────────────
+
+    match /users/{uid} {
+
+      // ── contacts ──────────────────────────────────────────────────────────
+      match /contacts/{contactId} {
+        allow read, delete: if isOwner(uid);
+
+        allow create: if isOwner(uid)
+            && validString(request.resource.data.name,  50)
+            && validString(request.resource.data.phone, 15);
+
+        // Allow update so the optimistic-replace in contacts_service works.
+        // The same field constraints apply on update.
+        allow update: if isOwner(uid)
+            && validString(request.resource.data.name,  50)
+            && validString(request.resource.data.phone, 15);
+      }
+
+      // ── alerts (SOS event log — immutable after create) ──────────────────
+      match /alerts/{alertId} {
+        allow read: if isOwner(uid);
+
+        allow create: if isOwner(uid)
+            // Required top-level fields
+            && request.resource.data.keys().hasAll([
+                 'timestamp', 'locationLink', 'usedCombinedUri',
+                 'contactsNotified', 'totalContacts', 'successCount'
+               ])
+            && request.resource.data.locationLink   is string
+            && request.resource.data.usedCombinedUri is bool
+            && request.resource.data.totalContacts   is int
+            && request.resource.data.successCount    is int
+            && request.resource.data.totalContacts   >= 0
+            && request.resource.data.successCount    >= 0;
+
+        // update and delete intentionally omitted → denied
+      }
+
+      // ── trips (trip history — immutable after create) ─────────────────────
+      match /trips/{tripId} {
+        allow read: if isOwner(uid);
+
+        allow create: if isOwner(uid)
+            && request.resource.data.keys().hasAll([
+                 'startedAt', 'endedAt',
+                 'startLat',  'startLng',
+                 'endLat',    'endLng',
+                 'distanceTravelledKm', 'hadAnomaly'
+               ])
+            && request.resource.data.startLat            is number
+            && request.resource.data.startLng            is number
+            && request.resource.data.endLat              is number
+            && request.resource.data.endLng              is number
+            && request.resource.data.distanceTravelledKm is number
+            && request.resource.data.distanceTravelledKm >= 0
+            && request.resource.data.hadAnomaly          is bool;
+
+        // update and delete intentionally omitted → denied
+      }
+
+      // ── settings (user preferences) ────────────────────────────────────────
+      match /settings/{docId} {
+        allow read: if isOwner(uid);
+
+        // Merge writes are used (SetOptions.merge) so we only validate the
+        // field that is actually present in the write, not the full document.
+        allow write: if isOwner(uid)
+            && (
+              !('voiceSosEnabled' in request.resource.data)
+              || request.resource.data['voiceSosEnabled'] is bool
+            );
+      }
+    }
+
+    // ── drivers/{vehicleNumber} ─────────────────────────────────────────────
+    // Read-only registry.  Writes are managed exclusively through the Firebase
+    // Admin SDK (console or backend) — never from client app code.
+    match /drivers/{vehicleNumber} {
+      allow read: if request.auth != null;
+      // write not listed → denied for all authenticated and unauthenticated users
+    }
+
+    // ── Catch-all: deny everything not explicitly matched above ─────────────
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -13,6 +13,7 @@ import 'package:share_plus/share_plus.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/constants/app_constants.dart';
 import '../../models/contact.dart';
+import '../../services/alert_service.dart';
 import '../../services/contacts_service.dart';
 import '../../services/location_service.dart';
 import '../../services/risk_engine.dart';            // ← NEW
@@ -23,10 +24,8 @@ import '../../widgets/profile_avatar.dart';
 import 'destination_picker.dart';
 
 // ============================================================================
-//  Stadia Maps configuration
-//  Sign up for a free API key (200k tiles/month) at https://client.stadiamaps.com/
+//  OpenStreetMap — no API key required
 // ============================================================================
-const _kStadiaMapsApiKey = '59a00577-d14e-4018-bb73-938d4f6331a8';
 
 // ============================================================================
 //  TripScreen
@@ -132,6 +131,10 @@ class _TripScreenState extends ConsumerState<TripScreen> {
       if (_userPosition != null) _tripPath.add(_userPosition!);
     });
     ref.read(tripProvider.notifier).startTripManually();
+
+    // Start 15-min live-tracking session so contacts receive location updates.
+    ref.read(alertServiceProvider).startLiveTrackingSession();
+
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
       content: Text('🚗 Journey started. Monitoring route…'),
       backgroundColor: AppColors.safeGreenDark,
@@ -161,6 +164,8 @@ class _TripScreenState extends ConsumerState<TripScreen> {
 
   void _endJourney() {
     ref.read(tripProvider.notifier).endTripManually();
+    // Stop live-tracking session when the trip ends.
+    ref.read(alertServiceProvider).stopLiveTrackingSession();
     setState(() {
       _tripPath.clear();
       _isDeviated = false;
@@ -175,8 +180,17 @@ class _TripScreenState extends ConsumerState<TripScreen> {
 
   void _shareTrip() {
     if (_userPosition != null) {
-      final link = 'https://www.google.com/maps?q=${_userPosition!.latitude},${_userPosition!.longitude}';
-      Share.share('🚨 Live Trip Tracking:\n$link', subject: 'SaveHer Live Trip');
+      final link = AlertService.generateMapLink(
+          _userPosition!.latitude, _userPosition!.longitude);
+
+      // Share via native share sheet for the user to forward manually.
+      Share.share('🚗 Trip started. Track my live location:\n$link',
+          subject: 'SafHer Live Trip');
+
+      // Also notify emergency contacts and start a 15-min update session.
+      final alertSvc = ref.read(alertServiceProvider);
+      alertSvc.sendLiveLocationUpdate(link);
+      alertSvc.startLiveTrackingSession();
     } else {
       Clipboard.setData(const ClipboardData(text: 'https://www.google.com/maps'));
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
@@ -275,17 +289,9 @@ class _TripScreenState extends ConsumerState<TripScreen> {
   Widget build(BuildContext context) {
     final tripState = ref.watch(tripProvider);
 
-    // Remaining: current GPS position → destination (updates on every fix)
     final double? remainingKm = tripState.hasDestination &&
             tripState.distanceToDestinationMetres != null
         ? tripState.distanceToDestinationMetres! / 1000.0
-        : null;
-
-    // Total: recorded trip start position → destination (fixed at trip start)
-    // Falls back to OSRM route distance if start position not yet captured.
-    final double? totalKm = tripState.isTripActive &&
-            tripState.totalDistanceMetres != null
-        ? tripState.totalDistanceMetres! / 1000.0
         : null;
 
     ref.listen<TripState>(tripProvider, (previous, next) {
@@ -319,7 +325,7 @@ class _TripScreenState extends ConsumerState<TripScreen> {
           children: [
             const Icon(LucideIcons.shield, color: AppColors.primaryPink),
             const SizedBox(width: 8),
-            Text('SaveHer',
+            Text('SafHer',
                 style: Theme.of(context).textTheme.titleLarge?.copyWith(
                     color: AppColors.primaryPink,
                     fontWeight: FontWeight.w800,
@@ -384,7 +390,7 @@ class _TripScreenState extends ConsumerState<TripScreen> {
                 padding: const EdgeInsets.only(top: 24, left: 16, right: 16, bottom: 100),
                 child: Column(
                   children: [
-                    _buildTripProgressCard(context, remainingKm, totalKm, tripState),
+                    _buildTripProgressCard(context, remainingKm, tripState),
                     // ── NEW: live risk card (only visible during active trip) ──
                     if (tripState.isTripActive) ...[
                       const SizedBox(height: 16),
@@ -456,12 +462,11 @@ class _TripScreenState extends ConsumerState<TripScreen> {
             flags: InteractiveFlag.pinchZoom | InteractiveFlag.drag),
       ),
       children: [
-        // ── Stadia Maps tile layer ─────────────────────────────────────────
+        // ── OpenStreetMap tile layer ───────────────────────────────────────
         TileLayer(
-          urlTemplate:
-              'https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}.png'
-              '?api_key=$_kStadiaMapsApiKey',
-          userAgentPackageName: 'com.example.safher',
+          urlTemplate: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+          subdomains: const ['a', 'b', 'c'],
+          userAgentPackageName: 'com.yourapp.saveher',
           maxZoom: 19,
         ),
 
@@ -548,24 +553,13 @@ class _TripScreenState extends ConsumerState<TripScreen> {
   Widget _buildTripProgressCard(
     BuildContext context,
     double? remainingKm,
-    double? totalKm,       // ← total distance from trip start → destination
     TripState tripState,
   ) {
     final bool hasDestination = tripState.hasDestination;
-    final double remaining    = remainingKm ?? 0.0;
-
-    // Progress = how much of the trip has been covered.
-    // Uses totalKm (start→dest) as the fixed baseline once the trip begins.
-    // Falls back to OSRM ETA-route distance if totalKm not yet available.
-    // Always clamped 0–1 so the bar never goes backwards or over 100%.
-    final double etaRouteKm = (_etaMinutes != null && _etaMinutes! > 0)
-        ? remaining  // ETA already reflects remaining — use as denominator proxy
-        : 0.0;
-    final double baseDist = (totalKm ?? 0.0) > 0.01
-        ? totalKm!
-        : etaRouteKm;
-    final double progress = (hasDestination && baseDist > 0.01)
-        ? (1.0 - (remaining / baseDist)).clamp(0.0, 1.0)
+    final double distance     = remainingKm ?? 0.0;
+    const double maxDist      = 10.0;
+    final double progress     = hasDestination && distance <= maxDist
+        ? ((maxDist - distance) / maxDist).clamp(0.0, 1.0)
         : 0.0;
 
     final bool isActive = tripState.isTripActive;
@@ -605,7 +599,7 @@ class _TripScreenState extends ConsumerState<TripScreen> {
                     const SizedBox(height: 4),
                     Text(
                       hasDestination
-                          ? '${remaining.toStringAsFixed(1)} km remaining to safety'
+                          ? '${distance.toStringAsFixed(1)} km remaining to safety'
                           : 'Set source and destination above',
                       style: Theme.of(context).textTheme.bodyMedium,
                     ),

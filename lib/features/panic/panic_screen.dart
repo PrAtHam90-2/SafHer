@@ -106,6 +106,8 @@ class PanicNotifier extends Notifier<SosState> {
 
   void reset() {
     _holdTimer?.cancel();
+    // Stop live-tracking when the user cancels SOS.
+    ref.read(alertServiceProvider).stopLiveTrackingSession();
     state = const SosIdle();
   }
 }
@@ -482,7 +484,7 @@ class _PanicScreenState extends ConsumerState<PanicScreen> {
                   ? null
                   : (_) =>
                       ref.read(voiceSosProvider.notifier).toggleListening(),
-              activeThumbColor: AppColors.primaryPink,
+              activeColor: AppColors.primaryPink,
               materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
             )
           else if (error)
@@ -558,6 +560,12 @@ class _PanicScreenState extends ConsumerState<PanicScreen> {
         const SizedBox(height: 12),
         _buildProtocolItem(
             context, 'Emergency contacts alerted via SMS', LucideIcons.users),
+        const SizedBox(height: 12),
+        _buildProtocolItem(
+            context, 'Nearest police station notified', LucideIcons.shieldAlert),
+        const SizedBox(height: 12),
+        _buildProtocolItem(
+            context, 'Continuous audio recording starts', LucideIcons.mic),
       ],
     );
   }

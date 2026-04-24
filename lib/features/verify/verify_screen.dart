@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
@@ -70,8 +71,21 @@ class _VerifyScreenState extends ConsumerState<VerifyScreen> {
 
   // ── TextField submit ────────────────────────────────────────────────────────
   void _submit() {
-    final value = _controller.text.trim();
-    if (value.isEmpty) return;
+    final raw = _controller.text.trim();
+    if (raw.isEmpty) return;
+
+    // Sanitize: strip non-alphanumeric, uppercase
+    final value = raw.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
+
+    // Guard against empty-after-sanitize or implausibly long input
+    if (value.isEmpty || value.length > 12) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Enter a valid vehicle number (max 12 alphanumeric characters).'),
+        behavior: SnackBarBehavior.floating,
+      ));
+      return;
+    }
+
     FocusScope.of(context).unfocus();
     ref.read(verifyProvider.notifier).verify(value);
   }
@@ -212,6 +226,10 @@ Shared via SafHer Women's Safety App''';
               controller: _controller,
               textCapitalization: TextCapitalization.characters,
               textInputAction: TextInputAction.search,
+              inputFormatters: [
+                LengthLimitingTextInputFormatter(12),
+                FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9]')),
+              ],
               onSubmitted: (_) => _submit(),
               decoration: InputDecoration(
                 hintText: 'Enter vehicle number  (MH12AB1234)',
